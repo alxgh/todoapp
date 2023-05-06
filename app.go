@@ -9,9 +9,47 @@ import (
 	"github.com/gdamore/tcell/v2"
 )
 
+type stack[T any] struct {
+	s []T
+}
+
+func (s *stack[T]) Len() int {
+	return len(s.s)
+}
+
+func (s *stack[T]) Push(v T) {
+	s.s = append(s.s, v)
+}
+
+func (s *stack[T]) Pop() (v T, ok bool) {
+	if len(s.s) == 0 {
+		return
+	}
+	ok = true
+	l := len(s.s)
+	v = s.s[l-1]
+	s.s = s.s[0 : l-1]
+	return
+}
+
+func (s *stack[T]) Last() (v T, ok bool) {
+	if len(s.s) == 0 {
+		return
+	}
+	ok = true
+	l := len(s.s)
+	v = s.s[l-1]
+	return
+}
+
 type Pos struct {
 	X int
 	Y int
+}
+
+type page struct {
+	name string
+	fn   func()
 }
 
 type app struct {
@@ -31,12 +69,14 @@ type app struct {
 	err           string
 	exit          bool
 	hideDoneTodos bool
+	pages         stack[page]
+	pageMap       map[string]page
 }
 
 func New(s tcell.Screen, todos []Todo) *app {
 	w, h := s.Size()
 	s.ShowCursor(0, 1)
-	return &app{
+	a := &app{
 		todos:         todos,
 		s:             s,
 		defaultPrompt: "> Default",
@@ -44,6 +84,20 @@ func New(s tcell.Screen, todos []Todo) *app {
 		width:         w,
 		cursor:        Pos{X: 0, Y: 1},
 	}
+
+	a.pageMap = map[string]page{
+		"main": {
+			name: "main",
+			fn:   a.renderTodos,
+		},
+		"help": {
+			name: "help",
+			fn:   a.renderHelp,
+		},
+	}
+
+	a.pages.Push(a.pageMap["main"])
+	return a
 }
 
 func (a *app) Run() {
@@ -74,6 +128,41 @@ func (a *app) enterPromptMode() {
 	a.cursor.Y = a.height - 1
 	a.cursor.X = a.inp.c + 1
 	a.showCursor()
+}
+
+func (a *app) helpPage() {
+	if lastPage, _ := a.pages.Last(); lastPage.name == "help" {
+		a.goToLastPage()
+	} else {
+		a.pages.Push(a.pageMap["help"])
+	}
+	a.renderPage()
+}
+
+func (a *app) renderHelp() {
+	style := tcell.StyleDefault.Background(tcell.ColorReset).Foreground(tcell.ColorReset)
+	a.clear(0, -1, 0, -1, style)
+	row := 0
+	writeStr(a.s, 0, row, style, "Help")
+	row++
+	writeStr(a.s, 0, row, style, "? => Show this help")
+	row++
+	writeStr(a.s, 0, row, style, ":add => Add todo")
+	row++
+	writeStr(a.s, 0, row, style, ":edit [todoidx] => Edit todo")
+	row++
+	writeStr(a.s, 0, row, style, ":del [todoidx] => Delete todo")
+	row++
+	writeStr(a.s, 0, row, style, "c => (un)Mark todo")
+	row++
+	writeStr(a.s, 0, row, style, "c => (un)Mark todo")
+	row++
+	writeStr(a.s, 0, row, style, "e => Edit current todo")
+	row++
+	writeStr(a.s, 0, row, style, "d => Delete current todo")
+	row++
+	writeStr(a.s, 0, row, style, "a => (un)Hide completed todos")
+	row++
 }
 
 func (a *app) writeTextToInp(s string) {
@@ -201,7 +290,7 @@ func (a *app) cursorHandle(ev *tcell.EventKey) {
 		}
 	}
 show_cursor:
-	a.renderTodos()
+	a.renderPage()
 	a.showCursor()
 }
 
@@ -222,7 +311,9 @@ func (a *app) loop() {
 			}*/
 			a.cursorHandle(ev)
 			if !a.promptMode {
-				if ev.Rune() == ':' {
+				if ev.Rune() == '?' {
+					a.helpPage()
+				} else if ev.Rune() == ':' {
 					a.enterPromptMode()
 				} else if ev.Rune() == 'n' {
 					a.enterPromptMode()
@@ -233,7 +324,7 @@ func (a *app) loop() {
 						continue
 					}
 					a.todos[todoIdx].Done = !a.todos[todoIdx].Done
-					a.renderTodos()
+					a.renderPage()
 				} else if ev.Rune() == 'd' {
 					todoIdx := a.startIdx + a.cursor.Y - 1
 					if todoIdx < 0 || todoIdx >= len(a.todos) {
@@ -243,7 +334,7 @@ func (a *app) loop() {
 					if a.startIdx+a.height-2 > len(a.todos) && a.startIdx > 0 {
 						a.startIdx -= 1
 					}
-					a.renderTodos()
+					a.renderPage()
 				} else if ev.Rune() == 'e' {
 					todoIdx := a.startIdx + a.cursor.Y - 1
 					if todoIdx < 0 || todoIdx >= len(a.todos) {
@@ -253,7 +344,7 @@ func (a *app) loop() {
 					a.writeTextToInp(fmt.Sprintf("edit %d ", todoIdx))
 				} else if ev.Rune() == 'a' {
 					a.hideDoneTodos = !a.hideDoneTodos
-					a.renderTodos()
+					a.renderPage()
 				}
 			}
 		}
@@ -281,16 +372,41 @@ func (a *app) renderPrompt() {
 	}
 }
 
+func (a *app) renderPage() {
+	p, _ := a.pages.Last()
+	p.fn()
+}
+
+func (a *app) changePage(pages page) {
+	a.pages.Push(pages)
+}
+
+func (a *app) goToLastPage() {
+	if a.pages.Len() > 1 {
+		a.pages.Pop()
+	}
+}
+
+func (a *app) clear(fw, tw, fc, tc int, style tcell.Style) {
+	if tw == -1 {
+		tw = a.width
+	}
+	if tc == -1 {
+		tc = a.height - 1
+	}
+	for x := fw; x < tw; x += 1 {
+		for y := fc; y < tc; y++ {
+			a.s.SetContent(x, y, ' ', nil, style)
+		}
+	}
+}
+
 func (a *app) renderTodos() {
 	style := tcell.StyleDefault.Background(tcell.ColorReset).Foreground(tcell.ColorReset)
 	tickStyle := tcell.StyleDefault.Background(tcell.ColorReset).Foreground(tcell.ColorSkyblue)
 	row := 0
+	a.clear(0, -1, 0, -1, style)
 	writeStr(a.s, 0, row, style, "TODO LIST :-)")
-	for c := 0; c < a.width; c += 1 {
-		for r := 1; r < a.height-1; r++ {
-			a.s.SetContent(c, r, ' ', nil, style)
-		}
-	}
 	for _, todo := range a.todos[a.startIdx:] {
 		if todo.Done && a.hideDoneTodos {
 			continue
@@ -307,6 +423,6 @@ func (a *app) renderTodos() {
 }
 
 func (a *app) render() {
-	a.renderTodos()
+	a.renderPage()
 	a.renderPrompt()
 }
